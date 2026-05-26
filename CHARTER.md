@@ -23,9 +23,9 @@ Provide males and females seeking to identify or treat symptoms of depression, a
 ## Context
 
 - **Users / affected parties:** who benefits, who is at risk, who might use the result.
-- **Data sources (proposed):** named sources, access status, license / ethics notes.
-- **Constraints:** time, compute, access, skills, scope.
-- **Ethics risks:** consent, retention, PII, fairness, deployment risk.
+- **Data sources (proposed):** https://openpsychometrics.org/_rawdata/
+- **Constraints:** time, statistics knowledge (process, results write up)
+- **Ethics risks:** not expected.
 
 ## Success criteria by milestone
 
