@@ -2,7 +2,7 @@
 
 > Filled in live during the **Studio Charter** session in week 3. Every section below is committed in the same commit at the end of that class block. See [Studio Charter (single-session inception)](https://courses.lpcordova.phd/data510/project-framework/charter-inception.html) for the script and time-boxes.
 
-**Owner team:** <names>
+**Owner team:** Bradley Allen
 **Owner Product Lead:** <name>
 **Peer Stakeholder POs:** <names of your 2 or 3 peer PO individuals>
 **Instructor / Sponsor:** Lucas Cordova (`LucasCordova` on GitHub)
@@ -14,11 +14,11 @@
 
 ## Vision
 
-One or two sentences. The world (or organization, or domain) if this project succeeds.
+Personality psychology / psychometrics. The target audience is males and females who are interested in assessing their emotional state for symptoms of depression, anxiety, and stress in order to seek treatment.
 
 ## Mission
 
-One or two sentences. What the owner team will actually do this semester.
+Everything.  The entire project, stem to stern.
 
 ## Context
 
