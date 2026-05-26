@@ -18,7 +18,7 @@ Personality psychology / psychometrics. The target audience is males and females
 
 ## Mission
 
-Everything.  The entire project, stem to stern.
+Provide males and females seeking to identify or treat symptoms of depression, anxiety, and stress with a set of predictors and vocabulary to identify their feelings and communicate them with their friends, family, therapsists.
 
 ## Context
 
@@ -43,9 +43,11 @@ Everything.  The entire project, stem to stern.
 
 ## Working agreements (triad with peer POs)
 
-- **Studio Brief due:** <example: by 5 pm the day before class, committed to `studio/briefs/W<NN>-<peer>.md` and linked in `#<project>-studio` on Discord>. If the owner team needs the peer POs to read or review something specific *before* the Studio Session (a data preview, model results, a draft figure), file the Brief earlier so the peer POs actually have time to do that homework. Otherwise the default is "before the Studio Session starts."
-- **Studio Critique due:** <example: by the end of class for the in-person discussion, or at an agreed-upon time within one day after class (e.g., 5 pm the next day) if the peer PO needs extra time to draft a thoughtful write-up>.
-- **Priority conflict resolution:** owner team integrates briefs in good faith; the instructor arbitrates (as Process Expert) if peer POs and owner team disagree.
+- **Studio Brief due:** Within 3 days of request.  Generally on milestone. Discuss during class and set concrete due dates.
+- 
+- **Studio Critique due:** Within 3 days of request.  Generally on milestone.  Discuss during class and set concrete due dates.
+- 
+- **Priority conflict resolution:** Yes.
 
 ## Response SLAs (Service Level Agreements)
 
