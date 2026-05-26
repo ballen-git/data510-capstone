@@ -4,7 +4,7 @@
 
 **Owner team:** Bradley Allen
 **Owner Product Lead:** <name>
-**Peer Stakeholder POs:** <names of your 2 or 3 peer PO individuals>
+**Peer Stakeholder POs:** Aaron Perez Sales, Addison Gage, Shanti Brodnick
 **Instructor / Sponsor:** Lucas Cordova (`LucasCordova` on GitHub)
 **GitHub repo:** <link to this repo>
 **GitHub Projects board:** <link>
