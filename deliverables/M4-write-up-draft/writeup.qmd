@@ -1,10 +1,8 @@
 ---
 title: "Capstone Project Write-Up"
-subtitle: "Replace with your project title"
+subtitle: "Gender Differences of Schmifferences: Testing Replication With Open Source Data"
 author:
-  - "Your Name"
-  - "Teammate Two"
-  - "Teammate Three"
+  - "Bradley Allen"
 date: today
 bibliography: refs.bib
 format:
