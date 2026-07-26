@@ -1,0 +1,2512 @@
+---
+title: 'Capstone Final Project, Summer 2026'
+# author: "Bradley Allen"
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r libraries, message=FALSE, echo=FALSE}
+library(tidyverse)
+library(naniar)
+library(lavaan)
+library(semTools)
+library(broom)
+library(lm.beta)
+library(effectsize)
+library(patchwork)
+library(knitr)
+library(kableExtra)
+```
+
+```{r data, echo=FALSE, message=FALSE}
+# ====================================
+# RAW DATA
+# ====================================
+
+raw_data = read_delim("data/data.csv", delim = "\t")
+
+raw_data = raw_data %>%
+  mutate(
+    # In the Codebook, these items are fake words and can be used to check for valid responses
+    # If a participant checks that they know all three, their response is invalid
+    valid = if_else((VCL6 + VCL9 + VCL12) == 3, 0, 1),
+    
+    # Per Lovibond & Lovibond (1995), Likert-scale should be 0-3, not 1-4
+    across(matches("^Q.*A$", ignore.case = FALSE), ~ .x - 1)
+    ) %>% 
+  filter(valid == 1, (gender == 1) | (gender == 2), age <= 100)
+
+# ====================================
+# DASS-21 DATA FRAME
+# ====================================
+
+dass21 = read.csv("dass21_categorical.csv")
+
+dass21 = dass21 %>% filter(valid == 1, gender %in% c("Male", "Female"), age <= 100)
+
+# ====================================
+# CREATE CFA DATA FRAME AND MODELS
+# ====================================
+
+# Clean and filter the dataset
+cleaned_data <- raw_data %>%
+  # Keep only identified Males (1) and Females (2)
+  filter(gender %in% c(1, 2)) %>%
+  # Convert gender to a factor for grouping
+  mutate(gender = factor(gender, levels = c(1, 2), labels = c("Male", "Female"))) %>%
+  # Select only the 42 question columns and the gender column
+  # OpenPsychometrics marks answer columns with an 'A' suffix (e.g., Q1A)
+  select(gender, matches("^Q[0-9]+A$")) %>%
+  # Drop any rows with missing data
+  drop_na()
+```
+
+# Table 1
+
+Demographic Characteristics by Gender
+
+```{r table-demo-desc, message=FALSE, warning=FALSE}
+# ====================================
+# DEMOGRAPHICS TABLE
+# ====================================
+
+# 1. Generate counts, age statistics, and labels
+summary_stats <- dass21 %>%
+  group_by(gender) %>%
+  summarise(
+    n = n(),
+    min_age  = min(age, na.rm = TRUE),
+    max_age  = max(age, na.rm = TRUE),
+    mean_age = sprintf("%.2f", round(mean(age, na.rm = TRUE), 2)),
+    sd_age   = sprintf("%.2f", round(sd(age, na.rm = TRUE), 2)),
+    .groups  = "drop"
+  )
+
+f_n <- summary_stats %>% filter(gender == "Female") %>% pull(n)
+m_n <- summary_stats %>% filter(gender == "Male") %>% pull(n)
+
+age_rows <- data.frame(
+  Variable = c("Min", "Max", "M", "SD"),
+  Female   = summary_stats %>% 
+    filter(gender == "Female") %>% 
+    select(min_age, max_age, mean_age, sd_age) %>% 
+    unlist() %>% 
+    as.character(),
+  Male     = summary_stats %>% 
+    filter(gender == "Male") %>% 
+    select(min_age, max_age, mean_age, sd_age) %>% 
+    unlist() %>% 
+    as.character()
+)
+
+# 2. Process Categorical Profile Blocks with clean string mapping
+demo_clean <- dass21 %>% 
+  select(gender, race, education, country) %>% 
+  mutate(
+    country = fct_other(country, keep = c("US", "AU", "CA", "GB", "ID", "MY", "PH"), other_level = "Other"),
+    country = case_match(
+      country, 
+      "US" ~ "United States", 
+      "AU" ~ "Australia",
+      "CA" ~ "Canada", 
+      "GB" ~ "Great Britain", 
+      "ID" ~ "Indonesia", 
+      "MY" ~ "Malaysia",
+      "PH" ~ "Philippines",
+      "Other" ~ "Other"),
+    education = if_else(education == "University degree", "Undergraduate degree", education),
+    across(everything(), as.character)
+  ) %>% 
+  pivot_longer(cols = c(race, education, country), names_to = "group", values_to = "Variable") %>% 
+  filter(!is.na(Variable), Variable != "NA", Variable != "") %>%
+  count(group, Variable, gender) %>% 
+  group_by(group, gender) %>% 
+  mutate(pct = round((n / sum(n)) * 100, 2)) %>% 
+  ungroup() %>% 
+  mutate(col_val = paste0(n, " (", sprintf("%.2f", pct), "%)")) %>%
+  select(group, Variable, gender, col_val) %>%
+  pivot_wider(names_from = gender, values_from = col_val, values_fill = "0 (0.00%)")
+
+# 3. Setup explicit template order sequences
+country_order   <- c("United States", 
+                     "Australia", 
+                     "Canada", 
+                     "Great Britain", 
+                     "Indonesia", 
+                     "Malaysia", 
+                     "Philippines", 
+                     "Other")
+education_order <- c("Less than high school", "High school", "Undergraduate degree", "Graduate degree")
+race_order      <- c("Arab", "Asian", "Black", "Indigenous Australian", "Native American", "White", "Other")
+
+c_final   <- demo_clean %>% filter(group == "country") %>% slice(match(country_order, Variable))
+e_block   <- demo_clean %>% filter(group == "education")
+e_ordered <- e_block %>% filter(Variable %in% education_order) %>% slice(match(education_order, Variable))
+e_other   <- e_block %>% filter(!Variable %in% education_order)
+e_final   <- bind_rows(e_ordered, e_other)
+r_final   <- demo_clean %>% filter(group == "race") %>% slice(match(race_order, Variable))
+
+# 4. Programmatically compute row indices dynamically based on actual lengths
+c_start <- 1
+c_end   <- nrow(c_final)
+
+e_start <- c_end + 1
+e_end   <- c_end + nrow(e_final)
+
+r_start <- e_end + 1
+r_end   <- e_end + nrow(r_final)
+
+a_start <- r_end + 1
+a_end   <- r_end + nrow(age_rows)
+
+final_table_data <- bind_rows(c_final, e_final, r_final) %>%
+  select(Variable, Female, Male) %>%
+  bind_rows(age_rows)
+
+# 5. Set up dynamic top headers containing your centered group metrics
+header_labels <- setNames(
+  c(1, 1, 1), 
+  c("Variable and Group", paste0("Female (n = ", f_n, ")"), paste0("Male (n = ", m_n, ")"))
+)
+
+# 6. Render table with headers
+final_table_data %>%
+  kbl(
+    col.names = c("", "n (%)", "n (%)"), 
+    # Align rows right for numbers, left for variable descriptions
+    align = c("l", "r", "r"), 
+    booktabs = TRUE #,
+    # caption = "Demographic Profile and Age Characteristics Split by Gender"
+  ) %>%
+  kable_styling(
+    font_size = 16, 
+    html_font = "Times New Roman", 
+    bootstrap_options = c("striped", "hover"), 
+    latex_options = "striped", 
+    full_width = TRUE
+  ) %>%
+  column_spec(1, width = "50%") %>% 
+  column_spec(2:3, width = "25%") %>%
+  add_header_above(header_labels) %>% 
+  # Overrides the second level subheaders to center perfectly under the top labels
+  row_spec(0, align = "c") %>% 
+  pack_rows("Country", c_start, c_end, bold = TRUE) %>%
+  pack_rows("Education", e_start, e_end, bold = TRUE) %>%
+  pack_rows("Race", r_start, r_end, bold = TRUE) %>%
+  pack_rows("Age (years)", a_start, a_end, bold = TRUE)
+```
+
+*Note.* *M* = Mean; *SD* = Standard Deviation.
+
+
+# Table 2
+
+DASS-21 Descriptive Statistics by Gender
+
+```{r table_dass21_desc, message=FALSE, warning=FALSE}
+
+# ====================================
+# DASS DESCRIPTIVES BY GENDER
+# ====================================
+
+# 1. Map your raw subscale names to clean text
+subscale_labels <- c(
+  "depres21" = "Scale Total", "dysphoria" = "Dysphoria", "hopelessness" = "Hopelessness",
+  "devaluation_of_life" = "Devaluation of Life", "self_depcrecation" = "Self-Deprecation",
+  "lack_interest" = "Lack of Interest", "anhedonia" = "Anhedonia", "inertia" = "Inertia",
+  "anxiet21" = "Scale Total", "autonomic_arousal" = "Autonomic Arousal",
+  "skeletal_musculature_effects" = "Skeletal Musculature Effects",
+  "situational_anxiety" = "Situational Anxiety", "anxious_affect" = "Anxious Affect",
+  "stress21" = "Scale Total", "difficulty_relaxing" = "Difficulty Relaxing",
+  "nervous_arousal" = "Nervous Arousal", "easily_upset" = "Easily Upset",
+  "irritable" = "Irritable", "impatient" = "Impatient"
+)
+
+# 2. Process your raw data
+dass_tab <- dass21 %>% 
+  select(gender, stress21, depres21, anxiet21, matches("^sub21")) %>% 
+  rename_with(~ str_replace(.x, "sub21_(.*)", "\\1"), starts_with("sub21_")) %>% 
+  rename(
+    devaluation_of_life = deval_life, 
+    self_depcrecation = self_deprec, 
+    autonomic_arousal = auto_arousal, 
+    skeletal_musculature_effects = skeletal_muscle, 
+    situational_anxiety = sit_anxiety, 
+    difficulty_relaxing = diff_relaxing
+  ) %>% 
+  group_by(gender) %>% 
+  summarise(across(
+    everything(), 
+    list(
+      mean = ~ mean(.x, na.rm = TRUE), 
+      sd   = ~ sd(.x, na.rm = TRUE), 
+      min  = ~ min(.x, na.rm = TRUE), 
+      max  = ~ max(.x, na.rm = TRUE), 
+      n    = ~ n()
+    ), 
+    .names = "{.col}___{.fn}"
+  )) %>% 
+  pivot_longer(
+    cols = -gender, 
+    names_to = c("subscale", ".value"), 
+    names_pattern = "(.*)___(.*)"
+  )
+
+# 3. Extract n values dynamically
+n_female <- dass_tab %>% filter(gender == "Female") %>% pull(n) %>% unique()
+n_male   <- dass_tab %>% filter(gender == "Male") %>% pull(n) %>% unique()
+
+# 4. Create the header vector safely to avoid the syntax error
+header_labels <- setNames(
+  c(1, 2, 2), 
+  c(" ", paste0("Female (n = ", n_female, ")"), paste0("Male (n = ", n_male, ")"))
+)
+
+# 5. Reshape side-by-side, drop n columns, and align rows
+wide_table_data <- dass_tab %>%
+  filter(subscale %in% names(subscale_labels)) %>%
+  mutate(
+    mean_fmt = sprintf("%.2f", round(mean, 2)),
+    sd_fmt   = sprintf("%.2f", round(sd, 2))
+  ) %>%
+  select(subscale, gender, mean_fmt, sd_fmt) %>%
+  pivot_wider(
+    id_cols = subscale,
+    names_from = gender,
+    values_from = c(mean_fmt, sd_fmt),
+    names_glue = "{gender}_{.value}"
+  ) %>%
+  slice(match(names(subscale_labels), subscale)) %>%
+  mutate(Variable = subscale_labels) %>%
+  select(
+    Variable, 
+    Female_mean_fmt, Female_sd_fmt, 
+    Male_mean_fmt, Male_sd_fmt
+  )
+
+# 6. Generate the wide table layout
+wide_table_data %>%
+  kbl(
+    col.names = c("Variable", "M", "SD", "M", "SD"),
+    align = c("l", "r", "r", "r", "r"),
+    booktabs = TRUE #,
+    #caption = "Descriptive Statistics for DASS-21 Subscales Split by Gender"
+  ) %>%
+  kable_styling(
+    font_size = 16,
+    html_font = "Times New Roman",
+    bootstrap_options = c("striped", "hover"),
+    latex_options = "striped",
+    full_width = TRUE
+  ) %>%
+  column_spec(1, width = "40%") %>%
+  column_spec(2:5, width = "15%") %>%
+  # Pass the safely constructed named vector here
+  add_header_above(header_labels) %>% 
+  pack_rows("Depression", 1, 8, bold = TRUE) %>%
+  pack_rows("Anxiety", 9, 13, bold = TRUE) %>%
+  pack_rows("Stress", 14, 19, bold = TRUE) %>%
+  row_spec(c(1, 9, 14), bold = TRUE)
+```
+
+*Note.* *M* = Mean; *SD* = Standard Deviation.
+
+
+# Fig. 1
+
+##### Missing Data
+
+```{r plot-missing-a, dpi=300, fig.width=9, fig.height=4.5, cache = TRUE}
+# Missing demographic
+missing_demo = gg_miss_var(dass21 %>%
+           select(country, source, education, urban, gender, engnat, age, 
+                  hand, religion, orientation, race, voted, married, 
+                  familysize, major_cat),
+           show_pct = TRUE) +
+  theme(
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(color = "black", size = 9), 
+    axis.text.x = element_text(color = "black"), 
+    legend.title = element_text(color = "black", size = 9), 
+    legend.text = element_text(color = "black", size = 9)
+    )
+
+missing_demo
+```
+
+```{r plot_missing_b, dpi=300, fig.width=9, fig.height=3, cache = TRUE}
+
+# ====================================
+# Missing DASS
+# ====================================
+
+missing_dass = gg_miss_var(dass21 %>%
+           select(matches("sub42"), stress21, depres21, anxiet21),
+           show_pct = TRUE) +
+  theme(
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(color = "black", size = 9), 
+    axis.text.x = element_text(color = "black"), 
+    legend.title = element_text(color = "black", size = 9), 
+    legend.text = element_text(color = "black", size = 9)
+    )
+
+# ====================================
+# Missing Personality
+# ====================================
+
+missing_personality = gg_miss_var(dass21 %>%
+           select(extraversion, agreeableness, conscientiousness, "emotional stability" = stability, openness) %>%
+             rename_with(~ str_to_title(.)),
+           show_pct = TRUE) +
+  theme(
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(color = "black", size = 9), 
+    axis.text.x = element_text(color = "black"), 
+    legend.title = element_text(color = "black", size = 9), 
+    legend.text = element_text(color = "black", size = 9)
+        )
+
+missing_traits = missing_dass + missing_personality
+missing_traits
+```
+
+
+
+# DASS Models
+
+## DASS-42
+
+```{r dass42-model}
+# ====================================
+# DASS-42 MODEL AND ORDERED ITEMS
+# ====================================
+
+dass42_model <- '
+  Depression =~ Q3A + Q5A + Q10A + Q13A + Q16A + Q17A + Q21A + Q24A + Q26A + Q31A + Q34A + Q37A + Q38A + Q42A
+  Anxiety =~ Q2A + Q4A + Q7A + Q9A + Q15A + Q19A + Q20A + Q23A + Q25A + Q28A + Q30A + Q36A + Q40A + Q41A
+  Stress =~ Q1A + Q6A + Q8A + Q11A + Q12A + Q14A + Q18A + Q22A + Q27A + Q29A + Q32A + Q33A + Q35A + Q39A '
+
+items_42 <- c("Q3A","Q5A","Q10A","Q13A","Q16A","Q17A","Q21A","Q24A","Q26A","Q31A","Q34A","Q37A","Q38A","Q42A",
+              "Q2A","Q4A","Q7A","Q9A","Q15A","Q19A","Q20A","Q23A","Q25A","Q28A","Q30A","Q36A","Q40A","Q41A",
+              "Q1A","Q6A","Q8A","Q11A","Q12A","Q14A","Q18A","Q22A","Q27A","Q29A","Q32A","Q33A","Q35A","Q39A")
+
+
+# ====================================
+# DASS-42 MULTI GROUP CFA
+# ====================================
+
+# Define the cache file path
+cache_file <- "rds_files/dass42_models_cache.rds"
+
+if (file.exists(cache_file)) {
+  
+  # 1. Load the cache file if it exists
+  # message("Loading models from cache...")
+  cached_models <- readRDS(cache_file)
+  
+  # 2. Extract the models back into separate variables
+  fit42_male       <- cached_models$fit42_male
+  fit42_female     <- cached_models$fit42_female
+  fit42_equal      <- cached_models$fit42_equal
+  
+} else {
+
+    # ====================================
+    # STEP 1: CALC. CFA FOR MALES
+    # ====================================
+    
+    # Fit the model separately per group using WLSMV and Theta parameterization
+    fit42_male <- cfa(model = dass42_model, 
+                              data = cleaned_data %>% filter(gender == "Male"), 
+                              ordered = items_42,
+                              estimator = "WLSMV",
+                              parameterization = "theta"
+                          )
+    
+    # View global fit statistics and parameter estimates
+    # summary(fit42_sep_male, fit.measures = TRUE, standardized = TRUE, modindices = TRUE)
+    
+    
+    # ====================================
+    # STEP 2: CALC. CFA FOR FEMALES
+    # ====================================
+    
+    fit42_female <- cfa(model = dass42_model, 
+                              data = cleaned_data %>% filter(gender == "Female"), 
+                              ordered = items_42,
+                              meanstructure = TRUE,
+                              estimator = "WLSMV",
+                              parameterization = "theta")
+    
+    # Full model summary
+    # summary(fit42_sep_female, fit.measures = TRUE, standardized = TRUE)
+    
+    
+    # ====================================
+    # STEP 3: CALC. CFA COMBINED (EQUAL FORM)
+    # ====================================
+    
+    fit42_equal <- cfa(model = dass42_model, 
+                              data = cleaned_data, 
+                              ordered = items_42,
+                              group = "gender",
+                              meanstructure = TRUE,       
+                              estimator = "WLSMV",
+                              parameterization = "theta")
+    
+    # Full model summary
+    # summary(fit42_equal, fit.measures = TRUE, standardized = TRUE, modindices = TRUE)
+    
+    # Save all environment variables into a single named list
+    models_to_cache <- list(
+      fit42_male       = fit42_male,
+      fit42_female     = fit42_female,
+      fit42_equal      = fit42_equal
+    )
+    
+    # Save RDS Object
+    saveRDS(models_to_cache, file = cache_file)
+    # message("Models successfully computed and cached!")
+}
+
+# ====================================
+# DASS-42 RESULTS TABLE
+# ====================================
+
+# Define the cache file path
+cache_file <- "rds_files/fit42_table.rds"
+
+if (file.exists(cache_file)) {
+  # 1. Load the cache list if it exists
+  cached_data <- readRDS(cache_file)
+  
+  # 2. Extract everything back into the environment
+  fit42_male   <- cached_data$fit42_male
+  fit42_female <- cached_data$fit42_female
+  fit42_equal  <- cached_data$fit42_equal
+  fit42_table  <- cached_data$fit42_table
+  
+} else {
+  # 1. Define the specific fit indices you need
+  selected_indices = c(
+    "chisq.scaled", "df.scaled", "rmsea.robust", 
+    "rmsea.ci.lower.robust", "rmsea.ci.upper.robust", 
+    "rmsea.pvalue.robust", "srmr", "cfi.robust", "tli.robust"
+  )
+  
+  # 2. Create a named list of your fitted models
+  model_list42 = list(
+    "M1: Single-group (Males)"   = fit42_male,
+    "M2: Single-group (Females)" = fit42_female,
+    "M3: Equal form"             = fit42_equal
+  )
+  
+  # 3. Extract, combine, and format the data
+  fit42_table = model_list42 %>%
+    lapply(function(m) fitmeasures(m, selected_indices)) %>%
+    do.call(rbind, .) %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column(var = "Model") %>%
+    mutate(across(where(is.numeric), ~ round(., 3))) %>% 
+    rename(
+      `Chi-Sq (Scaled)` = chisq.scaled,
+      `df (Scaled)`     = df.scaled,
+      `RMSEA (Robust)`  = rmsea.robust,
+      `RMSEA CI LL`     = rmsea.ci.lower.robust,
+      `RMSEA CI UL`     = rmsea.ci.upper.robust,
+      `RMSEA p-value`   = rmsea.pvalue.robust,
+      `SRMR`            = srmr,
+      `CFI (Robust)`    = cfi.robust,
+      `TLI (Robust)`    = tli.robust
+    )
+  
+  # 4. Save models AND the table into a single named list
+  data_to_cache <- list(
+    fit42_male   = fit42_male,
+    fit42_female = fit42_female,
+    fit42_equal  = fit42_equal,
+    fit42_table  = fit42_table
+  )
+  
+  # Save the combined RDS Object
+  saveRDS(data_to_cache, file = cache_file)
+}
+
+# 5. View your final table
+# print(fit42_table)
+
+# print(modificationIndices(fit42_equal, sort = TRUE, maximum.number = 10))
+
+# ====================================
+# DASS-42 MULTI GROUP CFA ADJUSTED
+# ====================================
+
+dass42_adjusted_model <- '
+  Depression =~ Q3A + Q5A + Q10A + Q13A + Q16A + Q17A + Q21A + Q24A + Q26A + Q31A + Q34A + Q37A + Q38A + Q42A
+  Anxiety =~ Q2A + Q4A + Q7A + Q9A + Q15A + Q19A + Q20A + Q23A + Q25A + Q28A + Q30A + Q36A + Q40A + Q41A
+  Stress =~ Q1A + Q6A + Q8A + Q11A + Q12A + Q14A + Q18A + Q22A + Q27A + Q29A + Q32A + Q33A + Q35A + Q39A
+  Q7A ~~ Q41A
+  Q21A ~~ Q38A
+  Q17A ~~ Q34A
+  Q10A ~~ Q37A
+  Q32A ~~ Q35A '
+
+# Define the cache file path
+cache_file <- "rds_files/dass42_adjusted_models_cache.rds"
+
+if (file.exists(cache_file)) {
+  
+  # 1. Load the cache file if it exists
+  # message("Loading models from cache...")
+  cached_models <- readRDS(cache_file)
+  
+  # 2. Extract the models back into separate variables
+  fit42adj_male       <- cached_models$fit42adj_male
+  fit42adj_female     <- cached_models$fit42adj_female
+  fit42adj_equal      <- cached_models$fit42adj_equal
+  fit42adj_loadings   <- cached_models$fit42adj_loadings
+  fit42adj_intercepts <- cached_models$fit42adj_intercepts
+  fit42adj_residuals  <- cached_models$fit42adj_residuals
+  
+} else {
+
+    # ====================================
+    # STEP 1: CALC. CFA FOR MALES
+    # ====================================
+    
+    # Fit the model separately per group using WLSMV and Theta parameterization
+    fit42adj_male <- cfa(model = dass42_adjusted_model, 
+                              data = cleaned_data %>% filter(gender == "Male"), 
+                              ordered = items_42,
+                              estimator = "WLSMV",
+                              parameterization = "theta"
+                          )
+    
+    # View global fit statistics and parameter estimates
+    # summary(fit42adj_sep_male, fit.measures = TRUE, standardized = TRUE, modindices = TRUE)
+    
+    
+    # ====================================
+    # STEP 2: CALC. CFA FOR FEMALES
+    # ====================================
+    
+    fit42adj_female <- cfa(model = dass42_adjusted_model, 
+                              data = cleaned_data %>% filter(gender == "Female"), 
+                              ordered = items_42,
+                              meanstructure = TRUE,
+                              estimator = "WLSMV",
+                              parameterization = "theta")
+    
+    # Full model summary
+    # summary(fit42adj_sep_female, fit.measures = TRUE, standardized = TRUE)
+    
+    
+    # ====================================
+    # STEP 3: CALC. CFA COMBINED (EQUAL FORM)
+    # ====================================
+    
+    fit42adj_equal <- cfa(model = dass42_adjusted_model, 
+                              data = cleaned_data, 
+                              ordered = items_42,
+                              group = "gender",
+                              meanstructure = TRUE,       
+                              estimator = "WLSMV",
+                              parameterization = "theta")
+    
+    # Full model summary
+    # summary(fit42adj_equal, fit.measures = TRUE, standardized = TRUE, modindices = TRUE)
+    
+    
+    # ====================================
+    # STEP 4: EQUAL FACTOR LOADINGS
+    # ====================================
+    
+    fit42adj_loadings <- cfa(model = dass42_adjusted_model,
+                              data = cleaned_data,
+                              ordered = items_42,
+                              group = "gender",
+                              group.equal = "loadings",
+                              estimator = "WLSMV",
+                              parameterization = "theta")
+    
+    # # summary(fit42adj_loadings, fit.measures = TRUE, standardized = TRUE, modindices = TRUE)
+    
+    # ====================================
+    # STEP 5: EQUAL INDICATOR INTERCEPTS
+    # ====================================
+    
+    fit42adj_intercepts <- cfa(model = dass42_adjusted_model, 
+                              data = cleaned_data, 
+                              ordered = items_42,
+                              group = "gender",
+                              meanstructure = TRUE,
+                              group.equal = c("loadings", "thresholds"),
+                              estimator = "WLSMV",
+                              parameterization = "theta"
+                          )
+    # summary(fit42adj_intercepts, fit.measures = TRUE, standardized = TRUE, modindices = TRUE)
+    
+    # ====================================
+    # STEP 6: EQUAL INDICATOR ERROR VARIANCES
+    # ====================================
+    
+    fit42adj_residuals <- cfa(model = dass42_adjusted_model, 
+                              data = cleaned_data, 
+                              ordered = items_42,
+                              group = "gender",
+                              meanstructure = TRUE,
+                              group.equal = c("loadings", "thresholds", "residuals"),
+                              estimator = "WLSMV",
+                              parameterization = "theta")
+    
+    # summary(fit42adj_residuals, fit.measures = TRUE, standardized = TRUE, modindices = TRUE)
+    
+    # Save all environment variables into a single named list
+    models_to_cache <- list(
+      fit42adj_male       = fit42adj_male,
+      fit42adj_female     = fit42adj_female,
+      fit42adj_equal      = fit42adj_equal,
+      fit42adj_loadings   = fit42adj_loadings,
+      fit42adj_intercepts = fit42adj_intercepts,
+      fit42adj_residuals  = fit42adj_residuals
+    )
+    
+    # Save RDS Object
+    saveRDS(models_to_cache, file = cache_file)
+    # message("Models successfully computed and cached!")
+}
+```
+
+## DASS-21
+
+```{r dass21-model}
+# ====================================
+# DASS-21 MODEL AND ORDERED ITEMS
+# ====================================
+
+dass21_model <- '
+  Depression =~ Q3A + Q5A + Q10A + Q13A + Q16A + Q17A + Q21A
+  Anxiety =~ Q2A + Q4A + Q7A + Q9A + Q15A + Q19A + Q20A
+  Stress =~ Q1A + Q6A + Q8A + Q11A + Q12A + Q14A + Q18A
+'
+
+items_21 <- c("Q3A","Q5A","Q10A","Q13A","Q16A","Q17A","Q21A",
+              "Q2A","Q4A","Q7A","Q9A","Q15A","Q19A","Q20A",
+              "Q1A","Q6A","Q8A","Q11A","Q12A","Q14A","Q18A")
+
+# ====================================
+# DASS-21 MULTI GROUP CFA
+# ====================================
+
+# Define the cache file path
+cache_file <- "rds_files/dass21_models_cache.rds"
+
+if (file.exists(cache_file)) {
+  
+  # 1. Load the cache file if it exists
+  # message("Loading models from cache...")
+  cached_models <- readRDS(cache_file)
+  
+  # 2. Extract the models back into separate variables
+  fit21_male       <- cached_models$fit21_male
+  fit21_female     <- cached_models$fit21_female
+  fit21_equal      <- cached_models$fit21_equal
+  fit21_loadings   <- cached_models$fit21_loadings
+  fit21_intercepts <- cached_models$fit21_intercepts
+  fit21_residuals  <- cached_models$fit21_residuals
+  
+} else {
+
+    # ====================================
+    # STEP 1: CALC. CFA FOR MALES
+    # ====================================
+    
+    # Fit the model separately per group using WLSMV and Theta parameterization
+    fit21_male <- cfa(model = dass21_model, 
+                              data = cleaned_data %>% filter(gender == "Male"), 
+                              ordered = items_21,
+                              estimator = "WLSMV",
+                              parameterization = "theta"
+                          )
+    
+    # View global fit statistics and parameter estimates
+    # summary(fit21_sep_male, fit.measures = TRUE, standardized = TRUE, modindices = TRUE)
+    
+    
+    # ====================================
+    # STEP 2: CALC. CFA FOR FEMALES
+    # ====================================
+    
+    fit21_female <- cfa(model = dass21_model, 
+                              data = cleaned_data %>% filter(gender == "Female"), 
+                              ordered = items_21,
+                              meanstructure = TRUE,
+                              estimator = "WLSMV",
+                              parameterization = "theta")
+    
+    # Full model summary
+    # summary(fit21_sep_female, fit.measures = TRUE, standardized = TRUE)
+    
+    
+    # ====================================
+    # STEP 3: CALC. CFA COMBINED (EQUAL FORM)
+    # ====================================
+    
+    fit21_equal <- cfa(model = dass21_model, 
+                              data = cleaned_data, 
+                              ordered = items_21,
+                              group = "gender",
+                              meanstructure = TRUE,       
+                              estimator = "WLSMV",
+                              parameterization = "theta")
+    
+    # Full model summary
+    # summary(fit21_equal, fit.measures = TRUE, standardized = TRUE, modindices = TRUE)
+    
+    
+    # ====================================
+    # STEP 4: EQUAL FACTOR LOADINGS
+    # ====================================
+    
+    fit21_loadings <- cfa(model = dass21_model,
+                              data = cleaned_data,
+                              ordered = items_21,
+                              group = "gender",
+                              group.equal = "loadings",
+                              estimator = "WLSMV",
+                              parameterization = "theta")
+    
+    # # summary(fit21_loadings, fit.measures = TRUE, standardized = TRUE, modindices = TRUE)
+    
+    # ====================================
+    # STEP 5: EQUAL INDICATOR INTERCEPTS
+    # ====================================
+    
+    fit21_intercepts <- cfa(model = dass21_model, 
+                              data = cleaned_data, 
+                              ordered = items_21,
+                              group = "gender",
+                              meanstructure = TRUE,
+                              group.equal = c("loadings", "thresholds"),
+                              estimator = "WLSMV",
+                              parameterization = "theta"
+                          )
+    # summary(fit21_intercepts, fit.measures = TRUE, standardized = TRUE, modindices = TRUE)
+    
+    # ====================================
+    # STEP 6: EQUAL INDICATOR ERROR VARIANCES
+    # ====================================
+    
+    fit21_residuals <- cfa(model = dass21_model, 
+                              data = cleaned_data, 
+                              ordered = items_21,
+                              group = "gender",
+                              meanstructure = TRUE,
+                              group.equal = c("loadings", "thresholds", "residuals"),
+                              estimator = "WLSMV",
+                              parameterization = "theta")
+    
+    # summary(fit21_residuals, fit.measures = TRUE, standardized = TRUE, modindices = TRUE)
+    
+    # Save all environment variables into a single named list
+    models_to_cache <- list(
+      fit21_male       = fit21_male,
+      fit21_female     = fit21_female,
+      fit21_equal      = fit21_equal,
+      fit21_loadings   = fit21_loadings,
+      fit21_intercepts = fit21_intercepts,
+      fit21_residuals  = fit21_residuals
+    )
+    
+    # Save RDS Object
+    saveRDS(models_to_cache, file = cache_file)
+    # message("Models successfully computed and cached!")
+}
+```
+
+
+# Table 3
+
+Comparison of Model Fit Indices for DASS-42 Adjusted and DASS-21 Models
+
+```{r table-dass-cfa, message=FALSE, warning=FALSE}
+
+# ====================================
+# DASS-42 ADJUSTED TABLE DATA
+# ====================================
+
+# Define the RDS file path
+rds_path <- "rds_files/fit42adj_table.rds"
+
+# Check if the RDS file already exists
+if (file.exists(rds_path)) {
+  
+  # Load the existing table from the file
+  fit42adj_table <- readRDS(rds_path)
+  # message("Loaded existing table from RDS file.")
+  
+} else {
+  
+  # 1. Define the specific fit indices you need
+  selected_indices <- c(
+    "chisq.scaled", "df.scaled", "rmsea.robust", 
+    "rmsea.ci.lower.robust", "rmsea.ci.upper.robust", 
+    "rmsea.pvalue.robust", "srmr", "cfi.robust", "tli.robust"
+  )
+
+  # 2. Create a named list of your fitted models
+  model_list42adj <- list(
+    "M1: Single-group (Males)"              = fit42adj_male,
+    "M2: Single-group (Females)"            = fit42adj_female,
+    "M3: Equal form"                        = fit42adj_equal,
+    "M4: Equal factor loadings"             = fit42adj_loadings,
+    "M5: Equal Intercepts"                  = fit42adj_intercepts,
+    "M6: Equal indicator error variances"   = fit42adj_residuals
+  )
+
+  # 3. Extract, combine, and format the data
+  fit42adj_table <- model_list42adj %>% 
+    # Extract fit measures for each model in the list
+    lapply(function(m) fitmeasures(m, selected_indices)) %>% 
+    # Bind the vector results into rows of a data frame
+    do.call(rbind, .) %>% 
+    # Convert to a standard data frame
+    as.data.frame() %>% 
+    # Move the model names from row names to an actual column
+    tibble::rownames_to_column(var = "Model") %>% 
+    # Optional: Round all numeric metrics to 3 decimal places for readability
+    mutate(across(where(is.numeric), ~ round(., 3))) %>%
+    mutate(chisq.scaled = round(chisq.scaled, 1)) %>%
+    rename(
+      `Chi-Sq (Scaled)` = chisq.scaled,
+      `df (Scaled)`     = df.scaled,
+      `RMSEA (Robust)`  = rmsea.robust,
+      `RMSEA CI LL`     = rmsea.ci.lower.robust,
+      `RMSEA CI UL`     = rmsea.ci.upper.robust,
+      `RMSEA p-value`   = rmsea.pvalue.robust,
+      `SRMR`            = srmr,
+      `CFI (Robust)`    = cfi.robust,
+      `TLI (Robust)`    = tli.robust
+    )
+  
+  # Save the newly created table to the RDS file
+  saveRDS(fit42adj_table, file = rds_path)
+  # message("Generated new table and saved to RDS file.")
+}
+
+# ====================================
+# DASS-21 TABLE DATA
+# ====================================
+
+# Define the RDS directory path
+rds_path_21 <- "rds_files/fit21_table.rds" 
+
+# Check if the RDS file already exists
+if (file.exists(rds_path_21)) { 
+  
+  # Load the existing table from the file
+  fit21_table <- readRDS(rds_path_21)
+  # message("Loaded existing fit21 table from RDS file.")
+  
+} else { 
+  
+  # 1. Define the specific fit indices you need
+  selected_indices <- c(
+    "chisq.scaled", "df.scaled", "rmsea.robust", 
+    "rmsea.ci.lower.robust", "rmsea.ci.upper.robust", 
+    "rmsea.pvalue.robust", "srmr", "cfi.robust", "tli.robust"
+  )
+  
+  # 2. Create a named list of your fitted models
+  model_list21 <- list(
+    "M1: Single-group (Males)"            = fit21_male, 
+    "M2: Single-group (Females)"          = fit21_female, 
+    "M3: Equal form"                      = fit21_equal, 
+    "M4: Equal factor loadings"           = fit21_loadings, 
+    "M5: Equal Intercepts"                = fit21_intercepts, 
+    "M6: Equal indicator error variances" = fit21_residuals
+  ) 
+  
+  # 3. Extract, combine, and format the data
+  fit21_table <- model_list21 %>% 
+    # Extract fit measures for each model in the list
+    lapply(function(m) fitmeasures(m, selected_indices)) %>% 
+    # Bind the vector results into rows of a data frame
+    do.call(rbind, .) %>% 
+    # Convert to a standard data frame
+    as.data.frame() %>% 
+    # Move the model names from row names to an actual column
+    tibble::rownames_to_column(var = "Model") %>% 
+    # Round all numeric metrics to 3 decimal places
+    mutate(across(where(is.numeric), ~ round(., 3))) %>% 
+    # Overwrite the chi-square column specifically to 1 decimal place
+    mutate(chisq.scaled = round(chisq.scaled, 1)) %>% 
+    rename(
+      `Chi-Sq (Scaled)` = chisq.scaled,
+      `df (Scaled)`     = df.scaled,
+      `RMSEA (Robust)`  = rmsea.robust,
+      `RMSEA CI LL`     = rmsea.ci.lower.robust,
+      `RMSEA CI UL`     = rmsea.ci.upper.robust,
+      `RMSEA p-value`   = rmsea.pvalue.robust,
+      `SRMR`            = srmr,
+      `CFI (Robust)`    = cfi.robust,
+      `TLI (Robust)`    = tli.robust
+    )
+  
+  # 4. FIXED: Save the variable AFTER the pipe finishes executing
+  saveRDS(fit21_table, file = rds_path_21)
+  # message("Generated new fit21 table and saved to RDS file.")
+}
+
+# ====================================
+# DASS-42, 21 CFA RESULTS TABLE
+# ====================================
+
+# Combine the data
+combined_models <- rbind(fit42adj_table, fit21_table) %>%
+  select(Model, everything()) %>%
+  select(-`RMSEA p-value`)
+
+# Generate the structured model fit table
+combined_models %>%
+  kbl(
+    align = c("l", "r", "r", "r", "r", "r", "r", "r", "r"),
+    booktabs = TRUE #,
+    # caption = "Comparison of Model Fit Indices for DASS-42 Adjusted and DASS-21 Models"
+  ) %>%
+  kable_classic(full_width = FALSE, html_font = "Times New Roman") %>%
+  kable_styling(
+    font_size = 16,
+    latex_options = "striped", 
+    bootstrap_options = "striped"
+  ) %>%
+  pack_rows("DASS-42 Adjusted Models", 1, 6, bold = TRUE) %>%
+  pack_rows("DASS-21 Models", 7, 12, bold = TRUE)
+```
+
+
+# Table 4
+
+Difference in Average Ten-item Personality Inventory Scores by Gender
+
+```{r table_personality, message=FALSE, warning=FALSE}
+# 1. Define the traits and display names in sequence
+trait_order <- c("openness", "agreeableness", "conscientiousness", "extraversion", "stability")
+
+trait_labels <- c(
+  "openness"          = "Openness",
+  "agreeableness"     = "Agreeableness",
+  "conscientiousness" = "Conscientiousness",
+  "extraversion"      = "Extraversion",
+  "stability"         = "Emotional Stability"
+)
+
+# 2. Reshape and calculate all statistics programmatically
+tidy_t_tests <- dass21 %>%
+  select(gender, all_of(trait_order)) %>%
+  filter(gender %in% c("Male", "Female")) %>%
+  pivot_longer(cols = -gender, names_to = "trait", values_to = "score") %>%
+  drop_na() %>%
+  group_by(trait) %>%
+  summarise(
+    t_obj = list(t.test(score ~ gender, data = pick(everything()), var.equal = FALSE)),
+    d_obj = list(cohens_d(score ~ gender, data = pick(everything()))),
+    
+    n_female  = sum(gender == "Female"),
+    m_female  = sprintf("%.2f", mean(score[gender == "Female"])),
+    sd_female = sprintf("%.2f", sd(score[gender == "Female"])),
+    
+    n_male    = sum(gender == "Male"),
+    m_male    = sprintf("%.2f", mean(score[gender == "Male"])),
+    sd_male   = sprintf("%.2f", sd(score[gender == "Male"])),
+    .groups   = "drop"
+  ) %>%
+  mutate(
+    t  = sprintf("%.2f", sapply(t_obj, function(x) x[["statistic"]])),
+    df = sprintf("%.1f", sapply(t_obj, function(x) x[["parameter"]])),
+    raw_p = sapply(t_obj, function(x) x[["p.value"]]),
+    p  = ifelse(raw_p < 0.001, "< .001", sub("^0", "", sprintf("%.3f", raw_p))),
+    d  = sprintf("%.2f", sapply(d_obj, function(x) x[["Cohens_d"]]))
+  ) %>%
+  slice(match(trait_order, trait))
+
+# 3. Manually construct the flat table grid matching the reference image layout
+table_rows <- list()
+bold_indices <- c() # Keeps track of which rows should be formatted bold
+current_row <- 1
+
+for (i in 1:nrow(tidy_t_tests)) {
+  data_row <- tidy_t_tests[i, ]
+  label_text <- trait_labels[[data_row[["trait"]]]]
+  
+  # Row A: The main trait header row containing the t-test statistics
+  trait_header_row <- data.frame(
+    Group_Label = label_text,
+    N  = "", M = "", SD = "",
+    t  = data_row[["t"]],
+    df = data_row[["df"]],
+    p  = data_row[["p"]],
+    d  = data_row[["d"]],
+    stringsAsFactors = FALSE
+  )
+  bold_indices <- c(bold_indices, current_row)
+  current_row <- current_row + 1
+  
+  # Row B: Females descriptive statistics row
+  female_data_row <- data.frame(
+    Group_Label = "  Females",
+    N  = as.character(data_row[["n_female"]]),
+    M  = data_row[["m_female"]],
+    SD = data_row[["sd_female"]],
+    t = "", df = "", p = "", d = "",
+    stringsAsFactors = FALSE
+  )
+  current_row <- current_row + 1
+  
+  # Row C: Males descriptive statistics row
+  male_data_row <- data.frame(
+    Group_Label = "  Males",
+    N  = as.character(data_row[["n_male"]]),
+    M  = data_row[["m_male"]],
+    SD = data_row[["sd_male"]],
+    t = "", df = "", p = "", d = "",
+    stringsAsFactors = FALSE
+  )
+  current_row <- current_row + 1
+  
+  table_rows[[i]] <- bind_rows(trait_header_row, female_data_row, male_data_row)
+}
+
+formatted_table_data <- bind_rows(table_rows)
+
+# 4. Render the table matching your exact image layout rules
+formatted_table_data %>%
+  kbl(
+    col.names = c("Variable and Group", "N", "M", "SD", "t", "df", "p", "Cohen's d"),
+    align = c("l", "r", "r", "r", "r", "r", "r", "r"),
+    booktabs = TRUE,
+    escape = FALSE #, # Allows the markdown asterisks for italics to render correctly
+    # caption = "Independent Samples t-Tests for Personality Variables Split by Gender"
+  ) %>%
+  kable_styling(
+    font_size = 16, 
+    html_font = "Times New Roman", 
+    bootstrap_options = c("striped", "hover"), 
+    latex_options = "striped", 
+    full_width = TRUE
+  ) %>%
+  # Match column width distribution percentages
+  column_spec(1, width = "30%") %>%
+  column_spec(2:8, width = "10%") %>%
+  # Keep your top header text perfectly centered
+  row_spec(0, align = "c") %>%
+  # Apply bold formatting to the trait rows dynamically tracked in Step 3
+  row_spec(bold_indices, bold = TRUE)
+```
+
+*Note.* *M* = Mean; *SD* = Standard Deviation.
+
+
+# Fig. 2
+
+Personality Difference Plots
+
+```{r plot_personality_dist, dpi=300, fig.width=9, fig.height=4, cache = TRUE}
+# ====================================
+# PERSONALITY DENSITY PLOT BY GENDER
+# ====================================
+
+personality = dass21 %>% 
+  # filter(gender != "Other") %>% 
+  select(gender, extraversion, agreeableness, conscientiousness, stability, openness) %>% 
+  pivot_longer(cols = -gender, names_to = "trait", values_to = "score") %>% 
+  mutate(
+    trait = str_replace_all(trait, "stability", "Emotional Stability"),
+    trait = str_to_title(trait),
+    # Order the plots by factor to match personality diff graphic
+    trait = factor(trait, 
+                   levels = c("Openness", "Agreeableness", "Conscientiousness", 
+                              "Extraversion", "Emotional Stability"))
+  ) %>% 
+  ggplot(aes(x = score, fill = gender)) + 
+  geom_density(alpha = 0.6, bw = .3, linewidth = .3) + 
+  facet_wrap(~trait) + 
+  scale_fill_manual(values = c("Male" = "deepskyblue", "Female" = "darkorange")) + 
+  scale_x_continuous(breaks = seq(1, 7, by = 2), limits = c(0,8)) + 
+  theme_minimal() + 
+  labs(
+    title = "Personality Trait Distributions by Gender", 
+    fill = "Gender"
+  ) + 
+  theme(
+    # Plot Level
+    plot.title = element_text(size = 11, hjust = 0),
+    plot.title.position = "plot", 
+
+    # Axes
+    axis.title = element_blank(), 
+    axis.text.x = element_text(color = "black"), 
+    axis.text.y = element_text(color = "black", size = 9), 
+
+    # Legend
+    legend.position = "bottom", 
+    legend.box = "horizontal", 
+    legend.title = element_text(color = "black", size = 9), 
+    legend.text = element_text(color = "black", size = 9)
+  )
+
+# ====================================
+# BARBELL PLOT OF MEAN DIFFERENCES
+# ====================================
+
+personality_diff = dass21 %>%
+  # filter(gender != "Other") %>%
+  select(gender, extraversion, agreeableness, conscientiousness, stability, openness) %>%
+  pivot_longer(cols = -gender, names_to = "trait", values_to = "score") %>%
+  mutate(
+    trait = str_replace_all(trait, "stability", "emotional stability"),
+    trait = str_to_title(trait)) %>%
+  group_by(trait, gender) %>%
+  summarise(mean_score = mean(score, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = gender, values_from = mean_score) %>%
+ggplot(aes(y = reorder(trait, Male))) +
+  geom_segment(aes(
+    x = Male,  xend = Female, 
+    y = trait, yend = trait), 
+    color = "darkorange",
+    alpha = 0.6
+    ) +
+  geom_point(
+    aes(x = Male, color = "Male"), 
+    size = 1.5, alpha = 0.6
+    ) +
+  geom_point(
+    aes(x = Female, color = "Female"), 
+    size = 1.5, alpha = 0.6) +
+  labs(
+    title = "Personality Trait Differences by Gender",
+    color = "Avg. Personality Score",
+  ) +
+  scale_color_manual(
+    values = c("Male" = "deepskyblue", 
+               "Female" = "darkorange")
+    ) +
+  scale_x_continuous(breaks = seq(1, 7, by = 2), limits = c(1,7)) +
+  theme(
+    # Plot Level
+    plot.title = element_text(size = 11, hjust = 0),
+    plot.title.position = "plot", 
+
+    # Panel and Grid Lines
+    panel.background = element_blank(), 
+    panel.border = element_blank(), 
+    panel.grid.major.x = element_line(color = "gray90", linewidth = 0.4, linetype = "dashed"),
+    panel.grid.minor = element_blank(), 
+
+    # Axes
+    axis.line = element_blank(), 
+    axis.title = element_blank(), 
+    axis.ticks = element_blank(),
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black", size = 9),
+
+    # Legend
+    legend.position = "bottom", 
+    legend.box = "horizontal",
+    legend.title = element_text(color = "black", size = 9),
+    legend.text = element_text(color = "black", size = 9),
+    legend.key = element_blank()
+    )
+
+combined_personality_plots = personality + personality_diff
+combined_personality_plots
+```
+
+```{r plot_qq_personality, dpi=300, fig.width=9, fig.height=4.5, cache = TRUE}
+# ====================================
+# QQ PLOT FEMALE PERSONALITY
+# ====================================
+
+fqq_personality = dass21 %>% 
+  filter(gender == "Female") %>%
+  select(gender, extraversion, agreeableness, conscientiousness, stability, openness) %>% 
+  pivot_longer(cols = -gender, names_to = "trait", values_to = "score") %>% 
+  mutate(
+    trait = str_replace_all(trait, "stability", "Emotional Stability"),
+    trait = str_to_title(trait),
+    # Order the plots by factor to match personality diff graphic
+    trait = factor(trait, 
+                   levels = c("Openness", "Agreeableness", "Conscientiousness", 
+                              "Extraversion", "Emotional Stability"))
+  ) %>%
+  ggplot(aes(sample = score)) +
+  stat_qq(color = "darkorange", alpha = 0.6, size = 1.5) +
+  stat_qq_line(color = "black") +
+  facet_wrap(~ trait) + # Creates individual panels per trait
+  labs(
+    title = "Normal Q-Q Plots for Personality",
+    x = "Theoretical Quantiles",
+    y = "Sample Quantiles"
+  ) +
+  scale_x_continuous(breaks = seq(-4, 4, by = 2), limits = c(-5,5)) +
+  scale_y_continuous(breaks = seq(-4, 12, by = 4), limits = c(-4,12)) +
+  theme_minimal() +
+  theme(
+    # Plot Level
+    plot.title = element_text(size = 11, hjust = 0),
+    plot.title.position = "plot", 
+
+    # Panel and Grid Lines
+    panel.background = element_blank(), 
+    panel.border = element_blank(), 
+    panel.grid.minor = element_blank(), 
+
+    # Axes
+    axis.line = element_blank(), 
+    axis.ticks = element_blank(),
+  )
+
+# ====================================
+# QQ PLOT MALE PERSONALITY
+# ====================================
+
+mqq_personality = dass21 %>% 
+  filter(gender == "Male") %>%
+  select(gender, extraversion, agreeableness, conscientiousness, stability, openness) %>% 
+  pivot_longer(cols = -gender, names_to = "trait", values_to = "score") %>% 
+  mutate(
+    trait = str_replace_all(trait, "stability", "Emotional Stability"),
+    trait = str_to_title(trait),
+    # Order the plots by factor to match personality diff graphic
+    trait = factor(trait, 
+                   levels = c("Openness", "Agreeableness", "Conscientiousness", 
+                              "Extraversion", "Emotional Stability"))
+  ) %>%
+  ggplot(aes(sample = score)) +
+  stat_qq(color = "deepskyblue", alpha = 0.6, size = 1.5) +
+  stat_qq_line(color = "black") +
+  facet_wrap(~ trait) +
+  # labs(
+  #   title = "Normal Q-Q Plots for Personality (Males)",
+  #   x = "Theoretical Quantiles",
+  #   y = "Sample Quantiles"
+  # ) +
+  scale_x_continuous(breaks = seq(-4, 4, by = 2), limits = c(-5,5)) +
+  scale_y_continuous(breaks = seq(-4, 12, by = 4), limits = c(-4,12)) +
+  theme_minimal() +
+  theme(
+    # Plot Level
+    plot.title = element_text(size = 11, hjust = 0),
+    plot.title.position = "plot", 
+
+    # Panel and Grid Lines
+    panel.background = element_blank(), 
+    panel.border = element_blank(), 
+    panel.grid.minor = element_blank(), 
+
+    # Axes
+    axis.line = element_blank(), 
+    axis.title = element_blank(), 
+    axis.ticks = element_blank(),
+  )
+
+combined_personality_qq = fqq_personality + mqq_personality
+combined_personality_qq
+```
+
+
+# Table 5
+
+Difference in Total DASS-21 Scores by Gender
+
+```{r table_dass21, message=FALSE, warning=FALSE}
+# 1. Define the explicit order and subscale matching maps
+subscale_order <- c("stress21", "depres21", "anxiet21")
+
+subscale_labels <- c(
+  "stress21" = "Stress",
+  "depres21" = "Depression",
+  "anxiet21" = "Anxiety"
+)
+
+# 2. Extract, calculate, and flatten the data grid completely inside one tidy pipe
+tidy_table_data <- dass21 %>%
+  select(gender, all_of(subscale_order)) %>%
+  filter(gender %in% c("Male", "Female")) %>%
+  pivot_longer(cols = -gender, names_to = "subscale", values_to = "score") %>%
+  drop_na() %>%
+  group_by(subscale) %>%
+  summarise(
+    t_obj = list(t.test(score ~ gender, data = pick(everything()), var.equal = FALSE)),
+    d_obj = list(cohens_d(score ~ gender, data = pick(everything()))),
+    
+    n_female  = sum(gender == "Female"),
+    m_female  = sprintf("%.2f", mean(score[gender == "Female"])),
+    sd_female = sprintf("%.2f", sd(score[gender == "Female"])),
+    
+    n_male    = sum(gender == "Male"),
+    m_male    = sprintf("%.2f", mean(score[gender == "Male"])),
+    sd_male   = sprintf("%.2f", sd(score[gender == "Male"])),
+    .groups   = "drop"
+  ) %>%
+  mutate(
+    t  = sprintf("%.2f", sapply(t_obj, function(x) x[["statistic"]])),
+    df = sprintf("%.1f", sapply(t_obj, function(x) x[["parameter"]])),
+    raw_p = sapply(t_obj, function(x) x[["p.value"]]),
+    p  = ifelse(raw_p < 0.001, "< .001", sub("^0", "", sprintf("%.3f", raw_p))),
+    d  = sprintf("%.2f", sapply(d_obj, function(x) x[["Cohens_d"]]))
+  ) %>%
+  group_by(subscale) %>%
+  # Flatten the summaries into a 3-row layout per subscale
+  reframe(
+    Variable_and_Group = c(subscale_labels[subscale], "  Females", "  Males"),
+    N  = c("", as.character(n_female), as.character(n_male)),
+    M  = c("", m_female, m_male),
+    SD = c("", sd_female, sd_male),
+    t  = c(t, "", ""),
+    df = c(df, "", ""),
+    p  = c(p, "", ""),
+    d  = c(d, "", "")
+  ) %>%
+  ungroup() %>%
+  # FIXED: Create a temporary sorting helper column based on our target list rules
+  mutate(sort_order = match(Variable_and_Group, subscale_labels)) %>%
+  fill(sort_order, .direction = "down") %>%
+  # Arrange using the helper variable, then clean up the tracking column
+  arrange(sort_order) %>%
+  select(-subscale, -sort_order)
+
+# 3. Dynamically find the row locations that should be bold (rows 1, 4, and 7)
+bold_row_indices <- which(tidy_table_data[["N"]] == "")
+
+# 4. Render the final table with centered headers and right-aligned cell numbers
+tidy_table_data %>%
+  kbl(
+    col.names = c("Variable and Group", "N", "M", "SD", "t", "df", "p", "Cohen's d"),
+    align = c("l", "r", "r", "r", "r", "r", "r", "r"),
+    booktabs = TRUE #,
+    # caption = "Independent Samples t-Tests for DASS-21 Subscales Split by Gender"
+  ) %>%
+  kable_styling(
+    font_size = 16, 
+    html_font = "Times New Roman", 
+    bootstrap_options = c("striped", "hover"), 
+    latex_options = "striped", 
+    full_width = TRUE
+  ) %>%
+  column_spec(1, width = "30%") %>%
+  column_spec(2:8, width = "10%") %>%
+  row_spec(0, align = "c") %>%
+  row_spec(bold_row_indices, bold = TRUE)
+```
+
+*Note.* *M* = Mean; *SD* = Standard Deviation.
+
+
+# Fig. 3
+
+Depression, Anxiety, Stress Difference Plots
+
+```{r plot_dass_dist, dpi=300, fig.width=9, fig.height=3, cache = TRUE}
+# ====================================
+# PERSONALITY DENSITY PLOT BY GENDER
+# ====================================
+
+dass_gender_dist = dass21 %>% 
+  # filter(gender != "Other") %>% 
+  select(gender, depres21, stress21, anxiet21) %>% 
+  pivot_longer(cols = -gender, names_to = "scale", values_to = "score") %>%
+  mutate(
+    scale = str_replace_all(scale, c("anxiet21" = "Anxiety", 
+                                     "depres21" = "Depression", 
+                                     "stress21" = "Stress")),
+    scale = factor(scale, levels = c("Stress", "Depression", "Anxiety"))
+    ) %>%
+  ggplot(aes(x = score, fill = gender)) + 
+  geom_density(alpha = 0.6, bw = 2, linewidth = .3) + 
+  facet_wrap(~scale) + 
+  scale_fill_manual(values = c("Male" = "deepskyblue", "Female" = "darkorange")) + 
+  scale_x_continuous(breaks = seq(0, 45, by = 10), limits = c(-5,45)) +
+  theme_minimal() + 
+  labs(
+    title = "DASS Distributions by Gender",
+    caption = "Scales ordered high to low by gender differences",
+    fill = "Gender"
+  ) + 
+  theme(
+    # Plot Level
+    plot.title = element_text(size = 11, hjust = 0),
+    plot.title.position = "plot",
+    plot.caption  = element_text(size = 8, hjust = 0),
+
+    # Axes
+    axis.title = element_blank(), 
+    axis.text.x = element_text(color = "black"), 
+    axis.text.y = element_text(color = "black", size = 9), 
+
+    # Legend
+    legend.position = "bottom", 
+    legend.box = "horizontal", 
+    legend.title = element_text(color = "black", size = 9), 
+    legend.text = element_text(color = "black", size = 9)
+  )
+
+# ====================================
+# BARBELL PLOT OF MEAN DIFFERENCES
+# ====================================
+
+dass_gender_diff = dass21 %>%
+  # filter(gender != "Other") %>%
+  select(gender, depres21, stress21, anxiet21) %>%
+  pivot_longer(cols = -gender, names_to = "scale", values_to = "score") %>%
+  mutate(
+    scale = str_replace_all(
+      scale, 
+      c("anxiet21" = "Anxiety", "depres21" = "Depression", "stress21" = "Stress"))
+    ) %>%
+  group_by(scale, gender) %>%
+  summarise(mean_score = mean(score, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = gender, values_from = mean_score) %>%
+ggplot(aes(y = reorder(scale, Female))) +
+  geom_segment(aes(
+    x = Male,  xend = Female,
+    y = scale, yend = scale),
+    color = "darkorange",
+    alpha = 0.6
+    ) +
+  geom_point(
+    aes(x = Male, color = "Male"),
+    size = 1.5, alpha = 0.6
+    ) +
+  geom_point(
+    aes(x = Female, color = "Female"),
+    size = 1.5, alpha = 0.6) +
+  labs(
+    title = "DASS Differences by Gender",
+    caption = "Scales ordered high to low by gender differences",
+    color = "Avg. Personality Score",
+  ) +
+  scale_color_manual(
+    values = c("Male" = "deepskyblue",
+               "Female" = "darkorange")
+    ) +
+  scale_x_continuous(breaks = seq(0, 45, by = 10), limits = c(0,45)) +
+  theme(
+    # Plot Level
+    plot.title = element_text(size = 11, hjust = 0),
+    plot.title.position = "plot",
+    plot.caption  = element_text(size = 8, hjust = 0),
+
+    # Panel and Grid Lines
+    panel.background = element_blank(),
+    panel.border = element_blank(),
+    panel.grid.major.x = element_line(color = "gray90", linewidth = 0.4, linetype = "dashed"),
+    panel.grid.minor = element_blank(),
+
+    # Axes
+    axis.line = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black", size = 9),
+
+    # Legend
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.title = element_text(color = "black", size = 9),
+    legend.text = element_text(color = "black", size = 9),
+    legend.key = element_blank()
+    )
+
+combined_personality_plots = dass_gender_dist + dass_gender_diff
+combined_personality_plots
+```
+
+```{r plot_qq_dass, dpi=300, fig.width=9, fig.height=3.5, cache = TRUE}
+# ====================================
+# QQ PLOT FEMALE DASS
+# ====================================
+
+fqq_dass = dass21 %>% 
+  filter(gender != "Female") %>%
+  select(gender, depres21, stress21, anxiet21) %>% 
+  pivot_longer(cols = -gender, names_to = "scale", values_to = "score") %>%
+  mutate(
+    scale = str_replace_all(scale, c("anxiet21" = "Anxiety", 
+                                     "depres21" = "Depression", 
+                                     "stress21" = "Stress")),
+    scale = factor(scale, levels = c("Stress", "Depression", "Anxiety"))
+    ) %>%
+  ggplot(aes(sample = score)) +
+  stat_qq(color = "darkorange", alpha = 0.6, size = 1.5) +
+  stat_qq_line(color = "black") +
+  facet_wrap(~ scale) +
+  labs(
+    title = "Normal Q-Q Plots for DASS",
+    x = "Theoretical Quantiles",
+    y = "Sample Quantiles"
+  ) +
+  theme_minimal() +
+  scale_x_continuous(breaks = seq(-4, 4, by = 2), limits = c(-5,5)) +
+  scale_y_continuous(breaks = seq(-50, 50, by = 50), limits = c(-10,60)) +
+  theme(
+    # Plot Level
+    plot.title = element_text(size = 11, hjust = 0),
+    plot.title.position = "plot", 
+
+    # Panel and Grid Lines
+    panel.background = element_blank(), 
+    panel.border = element_blank(), 
+    panel.grid.minor = element_blank(), 
+
+    # Axes
+    axis.line = element_blank(), 
+    axis.ticks = element_blank(),
+    axis.title.x = element_text(margin = margin(t = 10))
+  )
+
+# ====================================
+# QQ PLOT MALE DASS
+# ====================================
+
+mqq_dass = dass21 %>% 
+  filter(gender != "Male") %>%
+  select(gender, depres21, stress21, anxiet21) %>% 
+  pivot_longer(cols = -gender, names_to = "scale", values_to = "score") %>%
+  mutate(
+    scale = str_replace_all(scale, c("anxiet21" = "Anxiety", 
+                                     "depres21" = "Depression", 
+                                     "stress21" = "Stress")),
+    scale = factor(scale, levels = c("Stress", "Depression", "Anxiety"))
+    ) %>%
+  ggplot(aes(sample = score)) +
+  stat_qq(color = "deepskyblue", alpha = 0.6, size = 1.5) +
+  stat_qq_line(color = "black") +
+  facet_wrap(~ scale) +
+  # labs(
+  #   title = "Normal Q-Q Plots for DASS (Males)",
+  #   x = "Theoretical Quantiles",
+  #   y = "Sample Quantiles"
+  # ) +
+  scale_x_continuous(breaks = seq(-4, 4, by = 2), limits = c(-5,5)) +
+  scale_y_continuous(breaks = seq(-50, 50, by = 50), limits = c(-10,60)) +
+  theme_minimal() +
+  theme(
+    # Plot Level
+    plot.title = element_text(size = 11, hjust = 0),
+    plot.title.position = "plot", 
+
+    # Panel and Grid Lines
+    panel.background = element_blank(), 
+    panel.border = element_blank(), 
+    panel.grid.minor = element_blank(), 
+
+    # Axes
+    axis.line = element_blank(), 
+    axis.title = element_blank(), 
+    axis.ticks = element_blank(),
+  )
+
+combined_dass_qq = fqq_dass + mqq_dass
+combined_dass_qq
+```
+
+# Regression
+
+Personality Traits as Predictors of Stress, Depression, and Anxiety
+
+```{r reg_models}
+# ====================================
+# REGRESSION MODELS: FEMALES
+# ====================================
+
+lm_fstress = lm(
+  stress21 ~ extraversion + agreeableness + conscientiousness + stability + openness,
+  data = dass21 %>% 
+    filter(gender == "Female") %>%
+    select(stress21, extraversion, agreeableness, conscientiousness, stability, openness)
+)
+
+lm_fdepress = lm(
+  depres21 ~ extraversion + agreeableness + conscientiousness + stability + openness,
+  data = dass21 %>% 
+    filter(gender == "Female") %>%
+    select(depres21, extraversion, agreeableness, conscientiousness, stability, openness)
+)
+
+lm_fanxiety = lm(
+  anxiet21 ~ extraversion + agreeableness + conscientiousness + stability + openness,
+  data = dass21 %>% 
+    filter(gender == "Female") %>%
+    select(anxiet21, extraversion, agreeableness, conscientiousness, stability, openness)
+)
+
+# ====================================
+# REGRESSION MODELS: MALES
+# ====================================
+
+lm_mstress = lm(
+  stress21 ~ extraversion + agreeableness + conscientiousness + stability + openness,
+  data = dass21 %>% 
+    filter(gender == "Male") %>%
+    select(stress21, extraversion, agreeableness, conscientiousness, stability, openness)
+)
+
+lm_mdepress = lm(
+  depres21 ~ extraversion + agreeableness + conscientiousness + stability + openness,
+  data = dass21 %>% 
+    filter(gender == "Male") %>%
+    select(depres21, extraversion, agreeableness, conscientiousness, stability, openness)
+)
+
+lm_manxiety = lm(
+  anxiet21 ~ extraversion + agreeableness + conscientiousness + stability + openness,
+  data = dass21 %>% 
+    filter(gender == "Male") %>%
+    select(anxiet21, extraversion, agreeableness, conscientiousness, stability, openness)
+)
+```
+
+## Standardized Coefficients
+
+```{r, include=FALSE}
+lm_fstress_std <- lm.beta(lm_fstress)
+lm_fdepress_std <- lm.beta(lm_fdepress)
+lm_fanxiety_std <- lm.beta(lm_fanxiety)
+lm_mstress_std <- lm.beta(lm_mstress)
+lm_mdepress_std <- lm.beta(lm_mdepress)
+lm_manxiety_std <- lm.beta(lm_manxiety)
+
+summary(lm_fstress_std)
+summary(lm_fdepress_std)
+summary(lm_fanxiety_std)
+summary(lm_mstress_std)
+summary(lm_mdepress_std)
+summary(lm_manxiety_std)
+```
+
+# Table 6.1
+
+Personality Traits as Predictors of Stress, Depression, and Anxiety
+
+```{r table_mreg}
+# ====================================
+# MULTIPLE REGRESSION RESULTS
+# ====================================
+
+# 1. Place your model objects into a structured named list
+model_list <- list(
+  "Stress_Female"     = lm_fstress,
+  "Stress_Male"       = lm_mstress,
+  "Depression_Female" = lm_fdepress,
+  "Depression_Male"   = lm_mdepress,
+  "Anxiety_Female"    = lm_fanxiety,
+  "Anxiety_Male"      = lm_manxiety
+)
+
+# Predictor clean names map
+predictor_labels <- c(
+  "(Intercept)"       = "Intercept",
+  "extraversion"      = "Extraversion",
+  "agreeableness"     = "Agreeableness",
+  "conscientiousness" = "Conscientiousness",
+  "stability"         = "Emotional Stability",
+  "openness"          = "Openness"
+)
+
+# 2. Extract and shape statistics into a wide format (side-by-side)
+extracted_data <- imap_dfr(model_list, function(model, name) {
+  name_parts   <- unlist(strsplit(name, "_"))
+  outcome_type <- name_parts[1]
+  gender_type  <- name_parts[2]
+  
+  sum_mod     <- summary(model)
+  coef_matrix <- sum_mod$coefficients
+  
+  data.frame(
+    Outcome   = outcome_type,
+    Gender    = gender_type,
+    term      = rownames(coef_matrix),
+    b         = sprintf("%.2f", coef_matrix[, "Estimate"]),
+    t_val     = sprintf("%.2f", coef_matrix[, "t value"]),
+    raw_p     = coef_matrix[, "Pr(>|t|)"],
+    r_sq      = sprintf("%.2f", sum_mod$r.squared),
+    stringsAsFactors = FALSE
+  )
+}) %>%
+  mutate(
+    p = ifelse(raw_p < 0.001, "< .001", sub("^0", "", sprintf("%.3f", raw_p))),
+    Variable_Label = predictor_labels[term]
+  )
+
+# Pivot wide so Female and Male stats sit on the exact same row
+wide_table_data <- extracted_data %>%
+  select(Outcome, Variable_Label, Gender, b, t_val, p, r_sq) %>%
+  pivot_wider(
+    id_cols = c(Outcome, Variable_Label),
+    names_from = Gender,
+    values_from = c(b, t_val, p, r_sq)
+  )
+
+# 3. Build the flat table structure row-by-row
+table_rows <- list()
+bold_indices <- c()
+current_row <- 1
+list_counter <- 1
+
+outcomes_order <- c("Stress", "Depression", "Anxiety")
+predictors_order <- c("Intercept", "Openness", "Agreeableness", "Conscientiousness", "Extraversion", "Emotional Stability")
+
+for (out in outcomes_order) {
+  sub_data <- wide_table_data %>% filter(Outcome == out)
+  
+  if (nrow(sub_data) > 0) {
+    # Extract R2 values for the header row
+    r2_f <- sub_data$r_sq_Female[1]
+    r2_m <- sub_data$r_sq_Male[1]
+    
+    # Row A: The main bold outcome block header showing model fits
+    outcome_header <- data.frame(
+      Label = out,
+      b_F = "", t_F = "", p_F = paste0("R² = ", r2_f),
+      b_M = "", t_M = "", p_M = paste0("R² = ", r2_m),
+      stringsAsFactors = FALSE
+    )
+    bold_indices <- c(bold_indices, current_row)
+    current_row <- current_row + 1
+    table_rows[[list_counter]] <- outcome_header
+    list_counter <- list_counter + 1
+    
+    # Sort predictors consistently
+    sub_data <- sub_data %>%
+      mutate(Variable_Label = factor(Variable_Label, levels = predictors_order)) %>%
+      arrange(Variable_Label)
+    
+    # Rows B-G: Predictor data rows
+    predictor_rows <- data.frame(
+      Label = paste0("  ", sub_data$Variable_Label),
+      b_F   = sub_data$b_Female,
+      t_F   = sub_data$t_val_Female,
+      p_F   = sub_data$p_Female,
+      b_M   = sub_data$b_Male,
+      t_M   = sub_data$t_val_Male,
+      p_M   = sub_data$p_Male,
+      stringsAsFactors = FALSE
+    )
+    current_row <- current_row + nrow(predictor_rows)
+    table_rows[[list_counter]] <- predictor_rows
+    list_counter <- list_counter + 1
+  }
+}
+
+formatted_side_by_side <- bind_rows(table_rows)
+
+# 4. Render the side-by-side table with spanned header groupings
+formatted_side_by_side %>%
+  kbl(
+    col.names = c("Predictor Variable", "B", "t", "p", "B", "t", "p"),
+    align = c("l", "r", "r", "r", "r", "r", "r"),
+    booktabs = TRUE,
+    escape = FALSE
+  ) %>%
+  kable_styling(
+    font_size = 15, 
+    html_font = "Times New Roman", 
+    bootstrap_options = c("striped", "hover"), 
+    latex_options = "striped", 
+    full_width = TRUE
+  ) %>%
+  # Span column headers over the statistics
+  add_header_above(c(" " = 1, "Female Regression Models" = 3, "Male Regression Models" = 3), bold = TRUE) %>%
+  column_spec(1, width = "34%") %>%
+  column_spec(2:7, width = "11%") %>%
+  row_spec(0, align = "c") %>%
+  row_spec(bold_indices, bold = TRUE)
+```
+
+*Note.* *B* = unstandardized regression coefficient.
+
+# Table 6.2
+
+Multiple Regression with standardized regression coefficients
+
+```{r table_mreg_beta}
+# ====================================
+# MULTIPLE REGRESSION RESULTS         
+# ====================================
+# 1. Standardize your model objects using lm.beta and place into a structured named list
+model_list <- list(
+  "Stress_Female"     = lm.beta(lm_fstress),
+  "Stress_Male"       = lm.beta(lm_mstress),
+  "Depression_Female" = lm.beta(lm_fdepress),
+  "Depression_Male"   = lm.beta(lm_mdepress),
+  "Anxiety_Female"    = lm.beta(lm_fanxiety),
+  "Anxiety_Male"      = lm.beta(lm_manxiety)
+)
+
+# Predictor clean names map
+predictor_labels <- c(
+  "(Intercept)"       = "Intercept",
+  "extraversion"      = "Extraversion",
+  "agreeableness"     = "Agreeableness",
+  "conscientiousness" = "Conscientiousness",
+  "stability"         = "Emotional Stability",
+  "openness"          = "Openness"
+)
+
+# 2. Extract and shape statistics into a wide format (side-by-side)
+extracted_data <- imap_dfr(model_list, function(model, name) {
+  name_parts <- unlist(strsplit(name, "_"))
+  outcome_type <- name_parts[1]
+  gender_type <- name_parts[2]
+  
+  sum_mod <- summary(model)
+  coef_matrix <- sum_mod$coefficients
+  
+  data.frame(
+    Outcome = outcome_type,
+    Gender = gender_type,
+    term = rownames(coef_matrix),
+    # Maps to the new 'Standardized' column appended by lm.beta
+    beta = sprintf("%.2f", coef_matrix[, "Standardized"]), 
+    t_val = sprintf("%.2f", coef_matrix[, "t value"]),
+    raw_p = coef_matrix[, "Pr(>|t|)"],
+    r_sq = sprintf("%.2f", sum_mod$r.squared),
+    stringsAsFactors = FALSE
+  )
+}) %>% 
+  mutate(
+    p = ifelse(raw_p < 0.001, "< .001", sub("^0", "", sprintf("%.3f", raw_p))),
+    Variable_Label = predictor_labels[term]
+  )
+
+# Pivot wide so Female and Male stats sit on the exact same row
+wide_table_data <- extracted_data %>% 
+  select(Outcome, Variable_Label, Gender, beta, t_val, p, r_sq) %>% 
+  pivot_wider(
+    id_cols = c(Outcome, Variable_Label),
+    names_from = Gender,
+    values_from = c(beta, t_val, p, r_sq)
+  )
+
+# 3. Build the flat table structure row-by-row
+table_rows <- list()
+bold_indices <- c()
+current_row <- 1
+list_counter <- 1
+
+outcomes_order <- c("Stress", "Depression", "Anxiety")
+
+predictors_order <- c("Intercept", "Openness", "Agreeableness", "Conscientiousness", "Extraversion", "Emotional Stability") 
+
+for (out in outcomes_order) {
+  sub_data <- wide_table_data %>% filter(Outcome == out)
+  
+  if (nrow(sub_data) > 0) {
+    # Extract R2 values for the header row
+    r2_f <- sub_data$r_sq_Female[1]
+    r2_m <- sub_data$r_sq_Male[1]
+    
+    # Row A: The main bold outcome block header showing model fits
+    outcome_header <- data.frame(
+      Label = out,
+      beta_F = "",
+      t_F = "",
+      p_F = paste0("R² = ", r2_f),
+      beta_M = "",
+      t_M = "",
+      p_M = paste0("R² = ", r2_m),
+      stringsAsFactors = FALSE
+    )
+    
+    bold_indices <- c(bold_indices, current_row)
+    current_row <- current_row + 1
+    table_rows[[list_counter]] <- outcome_header
+    list_counter <- list_counter + 1
+    
+    # Sort predictors consistently
+    sub_data <- sub_data %>% 
+      mutate(Variable_Label = factor(Variable_Label, levels = predictors_order)) %>% 
+      arrange(Variable_Label)
+    
+    # Rows B-G: Predictor data rows
+    predictor_rows <- data.frame(
+      Label = paste0("  ", sub_data$Variable_Label),
+      beta_F = sub_data$beta_Female,
+      t_F = sub_data$t_val_Female,
+      p_F = sub_data$p_Female,
+      beta_M = sub_data$beta_Male,
+      t_M = sub_data$t_val_Male,
+      p_M = sub_data$p_Male,
+      stringsAsFactors = FALSE
+    )
+    
+    current_row <- current_row + nrow(predictor_rows)
+    table_rows[[list_counter]] <- predictor_rows
+    list_counter <- list_counter + 1
+  }
+}
+
+formatted_side_by_side <- bind_rows(table_rows)
+
+# 4. Render the side-by-side table with spanned header groupings
+# Updated column labels string "B" to the symbol for Standardized Betas "β"
+formatted_side_by_side %>% 
+  kbl(
+    col.names = c("Predictor Variable", "β", "t", "p", "β", "t", "p"), 
+    align = c("l", "r", "r", "r", "r", "r", "r"),
+    booktabs = TRUE,
+    escape = FALSE
+  ) %>% 
+  kable_styling(
+    font_size = 15,
+    html_font = "Times New Roman",
+    bootstrap_options = c("striped", "hover"),
+    latex_options = "striped",
+    full_width = TRUE
+  ) %>% 
+  # Span column headers over the statistics
+  add_header_above(c(" " = 1, "Female Regression Models" = 3, "Male Regression Models" = 3), bold = TRUE) %>% 
+  column_spec(1, width = "34%") %>% 
+  column_spec(2:7, width = "11%") %>% 
+  row_spec(0, align = "c") %>% 
+  row_spec(bold_indices, bold = TRUE)
+
+```
+
+
+# Fig. 4
+
+Personality Traits Predictors of Stress, Depression, Anxiety
+
+```{r plot_reg_error_beta, dpi=300, fig.width=9, fig.height=4.5, cache = TRUE}
+
+model_list <- list(
+  "Stress_Female"     = lm_fstress,
+  "Stress_Male"       = lm_mstress,
+  "Depression_Female" = lm_fdepress,
+  "Depression_Male"   = lm_mdepress,
+  "Anxiety_Female"    = lm_fanxiety,
+  "Anxiety_Male"      = lm_manxiety
+)
+
+predictor_labels <- c(
+  "openness"          = "Openness",
+  "agreeableness"     = "Agreeableness",
+  "conscientiousness" = "Conscientiousness",
+  "extraversion"      = "Extraversion",
+  "stability"         = "Emotional Stability"
+)
+
+# Extract standardized estimates and 95% CI
+plot_data <- imap_dfr(model_list, function(model, name) {
+  name_parts <- unlist(strsplit(name, "_"))
+  outcome_type <- name_parts[1]
+  gender_type <- name_parts[2]
+  
+  # Standardize the coefficients using lm.beta
+  beta_model <- lm.beta(model)
+  
+  # Extract standardized coefficients and standardized confidence intervals
+  coef_df <- as.data.frame(summary(beta_model)$coefficients)
+  ci_df <- as.data.frame(confint(beta_model))
+  
+  data.frame(
+    Outcome    = outcome_type,
+    Gender     = gender_type,
+    term       = rownames(coef_df),
+    Estimate   = coef_df[, "Standardized"], # Pull the beta weight column
+    Lower_CI   = ci_df[, 1],
+    Upper_CI   = ci_df[, 2],
+    stringsAsFactors = FALSE
+  )
+}) %>% 
+  # Filter out the intercept so it doesn't skew the visual scale
+  filter(term %in% names(predictor_labels)) %>% 
+  mutate(
+    Variable_Label = predictor_labels[term],
+    # Factor to control the exact vertical ordering of the traits
+    Variable_Label = factor(Variable_Label, levels = rev(c("Openness", "Agreeableness", "Conscientiousness", "Extraversion", "Emotional Stability"))),
+    Outcome = factor(Outcome, levels = c("Depression", "Anxiety", "Stress"))
+  )
+
+# 3. Create the Coefficient Plot (Updated for ggplot2 4.0.0+)
+coef_plot_beta = ggplot(plot_data, aes(x = Estimate, y = Variable_Label, color = Gender)) +
+  # Add a vertical reference line at 0 (indicating no effect)
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.6) +
+  geom_errorbar(aes(xmin = Lower_CI, xmax = Upper_CI), width = 0.2, linewidth = 0.8, alpha = 0.6, position = position_dodge(width = 0.5)) +
+  # Draw the point estimates
+  geom_point(size = 1.5, alpha = 0.6, position = position_dodge(width = 0.5)) +
+  # Split the layout into separate columns by Mental Health Outcome
+  facet_grid(. ~ Outcome) +
+  scale_color_manual(values = c("Female" = "darkorange", "Male" = "deepskyblue")) +
+  labs(
+    # title = "Personality Traits Predictors of Stress, Depression, Anxiety",
+    subtitle = "Comparing standardized regression coefficients (β) with 95% CIs across genders",
+    x = "Standardized Coefficient Estimate (β)",
+    y = "Personality Trait"
+  ) +
+  theme_minimal() +
+  theme(
+    # Plot Level
+    plot.title = element_text(size = 11, hjust = 0),
+    plot.title.position = "plot",
+    plot.subtitle = element_text(size = 9, hjust = 0, color = "black"),
+    plot.margin = margin(t = 10, r = 20, b = 10, l = 10, unit = "pt"),
+    
+    # Panel & Grid
+    panel.border = element_rect(color = "gray80", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    panel.spacing.x = unit(1.5, "lines"),
+    panel.grid.major = element_blank(),
+    
+    # Facet Strips
+    strip.text = element_text(size = 9),
+    
+    # Axes
+    axis.title.y = element_blank(),
+    axis.title.x = element_text(
+      color = "black",
+      size = 9,
+      margin = margin(t = 10)
+    ),
+    axis.text.x = element_text(
+      color = "black",
+      size = 9,
+    ),
+    axis.text.y = element_text(color = "black", size = 9),
+    
+    # Legend
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.title = element_blank(),
+    legend.text = element_text(color = "black", size = 9),
+    legend.margin = margin(t = -10)
+  )
+
+coef_plot_beta
+
+```
+
+```{r}
+ggsave(
+  filename = "personality_coefficients_plot.png", 
+  plot     = coef_plot_beta,
+  width    = 9,
+  height   = 4.5,
+  units    = "in",
+  dpi      = 300
+)
+```
+
+```{r plot_reg_error, dpi=300, fig.width=9, fig.height=4.5, cache = TRUE}
+
+model_list <- list(
+  "Stress_Female"     = lm_fstress,
+  "Stress_Male"       = lm_mstress,
+  "Depression_Female" = lm_fdepress,
+  "Depression_Male"   = lm_mdepress,
+  "Anxiety_Female"    = lm_fanxiety,
+  "Anxiety_Male"      = lm_manxiety
+)
+
+predictor_labels <- c(
+  "openness"          = "Openness",
+  "agreeableness"     = "Agreeableness",
+  "conscientiousness" = "Conscientiousness",
+  "extraversion"      = "Extraversion",
+  "stability"         = "Emotional Stability"
+)
+
+# Extract estimates and 95% CI
+plot_data <- imap_dfr(model_list, function(model, name) {
+  name_parts   <- unlist(strsplit(name, "_"))
+  outcome_type <- name_parts[1]
+  gender_type  <- name_parts[2]
+  
+  # Extract coefficients and confidence intervals
+  coef_df <- as.data.frame(summary(model)$coefficients)
+  ci_df   <- as.data.frame(confint(model))
+  
+  data.frame(
+    Outcome   = outcome_type,
+    Gender    = gender_type,
+    term      = rownames(coef_df),
+    Estimate  = coef_df[, "Estimate"],
+    Lower_CI  = ci_df[, 1],
+    Upper_CI  = ci_df[, 2],
+    stringsAsFactors = FALSE
+  )
+}) %>%
+  # Filter out the intercept so it doesn't skew the visual scale
+  filter(term %in% names(predictor_labels)) %>%
+  mutate(
+    Variable_Label = predictor_labels[term],
+    # Factor to control the exact vertical ordering of the traits
+    Variable_Label = factor(Variable_Label, levels = rev(c("Openness", "Agreeableness", "Conscientiousness", 
+                                                           "Extraversion", "Emotional Stability"))),
+    Outcome = factor(Outcome, levels = c("Depression", "Anxiety", "Stress"))
+  )
+
+# Create the Coefficient Plot
+coef_plot = ggplot(plot_data, aes(x = Estimate, y = Variable_Label, color = Gender)) +
+  # Add a vertical reference line at 0 (indicating no effect)
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.6) +
+  # Use geom_errorbar instead of geom_errorbarh (automatically detects horizontal orientation)
+  geom_errorbar(aes(xmin = Lower_CI, xmax = Upper_CI), 
+                width = 0.2, 
+                linewidth = 0.8,
+                alpha = 0.6,
+                position = position_dodge(width = 0.5)) +
+  # Draw the point estimates
+  geom_point(size = 1.5, alpha = 0.6, position = position_dodge(width = 0.5)) +
+  # Split the layout into separate columns by Mental Health Outcome
+  facet_grid(. ~ Outcome) +
+  scale_color_manual(values = c("Female" = "darkorange", "Male" = "deepskyblue")) +
+  labs(
+    # title = "Personality Traits Predictors of Stress, Depression, Anxiety",
+    subtitle = "Comparing unstandardized regression coefficients (B) with 95% CIs across genders",
+    x = "Coefficient Estimate (B)",
+    y = "Personality Trait"
+  ) +
+  theme_minimal() +
+  theme(
+    # Plot Level
+    plot.title = element_text(size = 11, hjust = 0),
+    plot.title.position = "plot",
+    plot.subtitle = element_text(size = 9, hjust = 0, color = "black"),
+    
+    # Panel & Grid
+    panel.border = element_rect(color = "gray80", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    
+    # Facet Strips
+    strip.text = element_text(size = 9),
+    
+    # Axes
+    axis.title.y = element_blank(),
+    axis.title.x = element_text(
+      color = "black", 
+      size = 9,
+      margin = margin(t = 10)
+    ),
+    axis.text.x = element_text(
+      color = "black",
+      size = 9,
+      ),
+    axis.text.y = element_text(color = "black", size = 9),
+    
+    # Legend
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.title = element_blank(),
+    legend.text = element_text(color = "black", size = 9),
+    legend.margin = margin(t = -10)
+  )
+ coef_plot
+```
+
+
+# Exploratory Data Analysis
+
+## Demographic EDA
+
+```{r plot_gender_dist, dpi=300, fig.width=9, fig.height=2.5, cache = TRUE}
+
+# ====================================
+# SAMPLE PROPORTION BY GENDER
+# ====================================
+
+gender_dist = dass21 %>% 
+  select(gender) %>% 
+  # filter(!is.na(gender), gender != "Other") %>% 
+  mutate(total_overall = n()) %>%
+  group_by(gender) %>% 
+  summarize(
+    proportion = n() / total_overall[1]
+  ) %>% 
+  ggplot(aes(x = fct_rev(fct_infreq(gender)), y = proportion, fill = gender)) + 
+  geom_col(alpha = 0.6) + 
+  scale_fill_manual(values = c("Male" = "deepskyblue", "Female" = "darkorange")) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Sample Distribution by Gender") +
+  coord_flip() + 
+  theme_minimal() + 
+  theme(
+    # Plot Level
+    plot.title = element_text(size = 11, hjust = 0),
+    plot.title.position = "plot", 
+
+    # Axes
+    axis.title = element_blank(),
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black", size = 9), 
+
+    # Legend
+    legend.position = "none"
+    # legend.title = element_text(color = "black", size = 9), 
+    # legend.text = element_text(color = "black", size = 9)
+        )
+
+# ====================================
+# SAMPLE DIST. BY RACE AND GENDER
+# ====================================
+
+race_gender_dist = dass21 %>% 
+  filter(!is.na(race), !is.na(gender), gender != "Other") %>% 
+  count(gender, race, name = "count") %>% 
+  group_by(gender) %>% 
+  mutate(proportion = count / sum(count)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = reorder(race, proportion), y = proportion, fill = gender)) + 
+  geom_col(alpha = 0.6, position = "dodge", show.legend = TRUE) + 
+  scale_fill_manual(values = c("Male" = "deepskyblue", 
+                               "Female" = "darkorange")) + 
+  
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) + 
+  labs(title = "Sample Distribution by Race and Gender") + 
+  coord_flip() + 
+  theme_minimal() + 
+  theme(
+    # Plot Level
+    plot.title = element_text(size = 11, hjust = 0),
+    plot.title.position = "plot", 
+
+    # Axes
+    axis.title = element_blank(),
+    axis.text.x = element_text(color = "black"), 
+    axis.text.y = element_text(color = "black", size = 9), 
+
+    # Legend
+    legend.position = "none"
+    # legend.title = element_text(color = "black", size = 9), 
+    # legend.text = element_text(color = "black", size = 9)
+        )
+
+combined_gender_dist_plots = gender_dist + race_gender_dist
+combined_gender_dist_plots
+
+```
+
+```{r plot_education, dpi=300, fig.width=9, fig.height=2.5, cache = TRUE}
+
+# ====================================
+# EDUCATION LEVEL PLOT
+# ====================================
+
+education_lvl = dass21 %>% 
+  filter(!is.na(education)) %>% 
+  count(education, name = "count") %>% 
+  mutate(proportion = count / sum(count)) %>% 
+  ggplot(aes(x = reorder(education, proportion), y = proportion)) + 
+  geom_col(fill = "#80A680", alpha = 0.6) + 
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) + 
+  labs(title = "Education Level") +
+  coord_flip() + 
+  theme_minimal() + 
+  theme(
+    # Plot Level
+    plot.title = element_text(size = 11, hjust = 0),
+    plot.title.position = "plot", 
+
+    # Axes
+    axis.title = element_blank(),
+    axis.text.x = element_text(color = "black"), 
+    axis.text.y = element_text(color = "black", size = 9), 
+
+    # Legend
+    legend.title = element_text(color = "black", size = 9), 
+    legend.text = element_text(color = "black", size = 9)
+    )
+
+# ====================================
+# EDUCATION LEVEL BY GENDER PLOT
+# ====================================
+
+education_lvl_gender = dass21 %>% 
+  filter(!is.na(education), !is.na(gender), gender != "Other") %>% 
+  count(gender, education, name = "count") %>% 
+  group_by(gender) %>% 
+  mutate(
+    proportion = count / sum(count)) %>% 
+  ungroup() %>% 
+  # Reorder education factor to match other plot.  Use rev() to account for coord_flip.
+  mutate(
+    education = factor(education, 
+                       levels = rev(c("University degree", "High school", 
+                                      "Graduate degree", "Less than high school")))
+    ) %>%
+  ggplot(aes(x = education, y = proportion, fill = gender)) + 
+  geom_col(alpha = 0.6, position = "dodge", show.legend = TRUE) + 
+  scale_fill_manual(values = c("Male" = "deepskyblue", 
+                               "Female" = "darkorange")) + 
+  
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) + 
+  labs(title = "Education Level by Gender") + 
+  coord_flip() + 
+  theme_minimal() + 
+  theme(
+    # Plot Level
+    plot.title = element_text(size = 11, hjust = 0),
+    plot.title.position = "plot", 
+
+    # Axes
+    axis.title = element_blank(),
+    axis.text.x = element_text(color = "black"), 
+    axis.text.y = element_text(color = "black", size = 9), 
+
+    # Legend
+    legend.title = element_text(color = "black", size = 9), 
+    legend.text = element_text(color = "black", size = 9)
+        )
+
+combined_ed_level_plots = education_lvl + education_lvl_gender
+combined_ed_level_plots
+```
+
+```{r plot_major, dpi=300, fig.width=9, fig.height=3, cache = TRUE}
+# ====================================
+# MAJOR CATEGORY PLOT
+# ====================================
+
+majors_cat = dass21 %>% 
+  filter(!is.na(major_cat)) %>% 
+  count(major_cat, name = "count") %>% 
+  mutate(proportion = count / sum(count)) %>% 
+  ggplot(aes(x = reorder(major_cat, proportion), y = proportion)) + 
+  geom_col(fill = "#80A680", alpha = 0.6) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  coord_flip() + 
+  labs(title = "Proportion of Majors by Category") +
+  theme_minimal() + 
+  theme(
+    # Plot Level
+    plot.title.position = "plot",
+    plot.title = element_text(size = 11, hjust = 0),
+
+    # Axes
+    axis.title = element_blank(),
+    axis.text.x = element_text(color = "black"), 
+    axis.text.y = element_text(color = "black", size = 9), 
+
+    # Legend
+    legend.title = element_text(color = "black", size = 9), 
+    legend.text = element_text(color = "black", size = 9)
+        )
+
+# ====================================
+# MAJOR CATEGORY BY GENDER PLOT
+# ====================================
+
+majors_gender = dass21 %>%
+  select(gender, major_cat) %>%
+  filter(!is.na(gender), !is.na(major_cat), gender != "Other") %>% 
+  group_by(gender) %>%
+  mutate(total_in_gender = n()) %>%
+  group_by(gender, major_cat) %>%
+  summarize(proportion = n() / total_in_gender[1], .groups = "drop") %>%
+  ggplot(aes(x = fct_reorder(major_cat, proportion, .desc = FALSE), 
+             y = proportion, 
+             fill = gender)) +
+  scale_fill_manual(values = c("Male" = "deepskyblue",
+                    "Female" = "darkorange")) +
+  geom_col(position = "dodge", alpha = .6) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Proportion of Major Categories by Gender") +
+  theme_minimal() +
+  theme(
+    # Plot Level
+    plot.title.position = "plot",
+    plot.title = element_text(size = 11, hjust = 0),
+
+    # Axes
+    axis.title = element_blank(),
+    axis.text.x = element_text(color = "black"), 
+    axis.text.y = element_text(color = "black", size = 9), 
+
+    # Legend
+    legend.title = element_text(color = "black", size = 9), 
+    legend.text = element_text(color = "black", size = 9)
+    ) +
+  coord_flip()
+
+combined_major_plots = majors_cat + majors_gender
+combined_major_plots
+```
+
+```{r plot_stem, dpi=300, fig.width=9, fig.height=3, cache = TRUE}
+# ====================================
+# STEM MAJORS PLOT
+# ====================================
+
+stem_majors = dass21 %>% 
+  filter(major_cat == "STEM & Natural Sciences", !is.na(major_std)) %>% 
+  count(major_std, name = "count") %>% 
+  mutate(proportion = count / sum(count)) %>% 
+  mutate(major_std = str_to_title(major_std)) %>%
+  slice_max(proportion, n = 10) %>% 
+  ggplot(aes(x = reorder(major_std, proportion), y = proportion)) + 
+  geom_col(fill = "#80A680", alpha = 0.6) + 
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) + 
+  labs(title = "Proportion of STEM Majors by Category") +
+  coord_flip() + 
+  theme_minimal() + 
+  theme(
+    # Plot Level
+    plot.title.position = "plot",
+    plot.title = element_text(size = 11, hjust = 0),
+
+    # Axes
+    axis.title = element_blank(),
+    axis.text.x = element_text(color = "black"), 
+    axis.text.y = element_text(color = "black", size = 9), 
+
+    # Legend
+    legend.title = element_text(color = "black", size = 9), 
+    legend.text = element_text(color = "black", size = 9)
+        )
+
+# ====================================
+# STEM MAJORS BY GENDER PLOT
+# ====================================
+
+stem_gender = dass21 %>% 
+  filter(major_cat == "STEM & Natural Sciences", 
+         !is.na(major_std), 
+         !is.na(gender), 
+         gender != "Other") %>% 
+  count(gender, major_std, name = "count") %>% 
+  group_by(gender) %>% 
+  mutate(proportion = count / sum(count)) %>% 
+  ungroup() %>% 
+  mutate(major_std = str_to_title(major_std)) %>%
+  group_by(gender) %>% 
+  slice_max(proportion, n = 9, with_ties = FALSE) %>% 
+  ungroup() %>%
+  ggplot(aes(x = reorder(major_std, proportion), y = proportion, fill = gender)) + 
+  geom_col(alpha = 0.6, position = "dodge") + 
+  scale_fill_manual(values = c("Male" = "deepskyblue", "Female" = "darkorange")) +
+  labs(title = "Proportion of STEM Majors by Gender") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) + 
+  coord_flip() + 
+  theme_minimal() + 
+  theme(
+    # Plot Level
+    plot.title.position = "plot",
+    plot.title = element_text(size = 11, hjust = 0),
+
+    # Axes
+    axis.title = element_blank(),
+    axis.text.x = element_text(color = "black"), 
+    axis.text.y = element_text(color = "black", size = 9), 
+
+    # Legend
+    legend.title = element_text(color = "black", size = 9), 
+    legend.text = element_text(color = "black", size = 9)
+        )
+
+combined_stem_plots = stem_majors + stem_gender
+combined_stem_plots
+```
